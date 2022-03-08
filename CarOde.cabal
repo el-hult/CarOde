@@ -1,0 +1,22 @@
+name:           CarOde
+version:        0.0
+author:         Ludvig Hult
+build-type:     Simple
+cabal-version:  >= 1.8
+
+executable CarOde
+  build-depends:  hvega, base
+  main-is:        Main.hs
+  extra-lib-dirs: 
+    bin
+    -- path to folder containing libblas.a
+    -- path to folder containing liblapack.a
+    C:\Users\Ludvig\Miniconda3\Library\lib
+    -- path to folder containing libgfortran.a
+    C:\Users\Ludvig\Miniconda3\pkgs\m2w64-gcc-fortran-5.3.0-6\Library\mingw-w64\lib\gcc\x86_64-w64-mingw32\5.3.0
+
+  extra-libraries: 
+    odepack
+    blas
+    lapack
+    gfortran
