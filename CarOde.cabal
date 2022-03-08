@@ -7,9 +7,11 @@ cabal-version:  >= 1.8
 executable CarOde
   build-depends:  hvega, base
   main-is:        Main.hs
+  other-modules:  LSODA
   extra-lib-dirs: 
     bin
     -- path to folder containing libblas.a
+    C:\Users\Ludvig\Miniconda3\Library\lib
     -- path to folder containing liblapack.a
     C:\Users\Ludvig\Miniconda3\Library\lib
     -- path to folder containing libgfortran.a
