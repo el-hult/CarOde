@@ -20,7 +20,7 @@ fprim neq t y =
 runLSODA :: IO ()
 runLSODA = do
   let ts = [4 * 10 ** m | m <- [-1 .. 11]]
-  let res = simpLsoda fprim [1, 0, 0] ts
+  let res = simpLsoda fprim [1, 0, 0] (StartStop 0 4e11)
   let LSODARes {success = didSucceed, ts = ts, ys = ys} = res
   if didSucceed
     then

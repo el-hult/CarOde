@@ -133,28 +133,38 @@ fprimWrapper fprim neqPtr tPtr yPtr yDotPtr = do
   t <- peek tPtr
   pokeArray yDotPtr $ fprim neq t y
 
+data TimeSpec
+  = -- | the start end end of the time interval. Indicates that the optimizer decides on step length
+    StartStop Double Double
+  | -- | The time values for which to return the output
+    Range [Double]
+
 -- | a simplified LSODA API for my specific use case :)
 simpLsoda ::
   -- | The right hand side in the ODE
   RHS ->
   -- | The initial state
   [Double] ->
-  -- | the time steps T for which to report results
-  [Double] ->
+  TimeSpec ->
   -- | returns
   -- left = error message
   -- right = the trajectory at the times t
   LSODARes
 {-# NOINLINE simpLsoda #-}
-simpLsoda ffun y0 ts = unsafePerformIO $ do
+simpLsoda ffun y0 (Range ts) = unsafePerformIO $ do
   let fex = fprimWrapper ffun
   if length ts <= 2
     then return $ res0 {msg = "Too short time vector", success = False, ys = [], ts = []}
-    else simpLsodaAux fex y0 ts
+    else simpLsodaAux fex y0 (Range ts)
+simpLsoda ffun y0 ts@(StartStop _ _) = unsafePerformIO $ do
+  let fex = fprimWrapper ffun
+  simpLsodaAux fex y0 ts
+
+lsodaDoneMsg = "Finished!"
 
 -- PRE length ts >= 2
-simpLsodaAux :: FFun -> [Double] -> [Double] -> IO LSODARes
-simpLsodaAux ffun y0 ts = do
+simpLsodaAux :: FFun -> [Double] -> TimeSpec -> IO LSODARes
+simpLsodaAux ffun y0 (Range ts) = do
   let neqVal = length y0
   let lrwVal = 70 -- this work array size must be adjusted somehow.
   let liwVal = 23 -- Im not sure if this value can ALWAYS be 23
@@ -179,7 +189,7 @@ simpLsodaAux ffun y0 ts = do
   -- PRE. initialize with success = True
   let step1 :: LSODARes -> [Double] -> IO LSODARes
       step1 res@LSODARes {success = False} _ = return res
-      step1 res@LSODARes {success = True} [] = return res {msg = "Finished!"}
+      step1 res@LSODARes {success = True} [] = return res {msg = lsodaDoneMsg}
       step1 res@LSODARes {ys = yOuts, ts = tsThisFar} (t : ts) = do
         poke tOutPtr t -- set the new target time
         -- do the solving
@@ -193,6 +203,59 @@ simpLsodaAux ffun y0 ts = do
           else step1 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"} ts
 
   finalVal <- step1 res0 {ys = [], ts = [], success = True, msg = ""} ts
+
+  rwork <- peekArray lrwVal rWorkPtr
+  iwork <- peekArray liwVal iWorkPtr
+  return
+    finalVal
+      { noStepsTaken = iwork !! 10,
+        noFs = iwork !! 11,
+        noJs = iwork !! 12,
+        lastMethodUsed = iwork !! 18,
+        lastSwitchedAt = rwork !! 14
+      }
+simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
+  let neqVal = length y0
+  let lrn = 20+16*neqVal                  -- length of rwork for nonstiff mode
+  let lrs = 22 + 9*neqVal + neqVal*neqVal -- length of rwork for    stiff mode
+  let lrwVal = max lrn lrs
+  let liwVal = 20 + neqVal
+  let jtVal = 2
+  fPtr <- wrapFFun ffun
+  neqPtr <- new neqVal
+  iWorkPtr <- newArray $ replicate liwVal 0
+  rWorkPtr <- newArray $ replicate lrwVal 0
+  yPtr <- newArray y0
+  tPtr <- new tStart
+  tOutPtr <- new tEnd -- it is not clear to me if this matters much 
+  iTolPtr <- new 2
+  rTolPtr <- new 1e-4
+  aTolPtr <- newArray [1e-6, 1e-10, 1e-6]
+  iTaskPtr <- new 5 -- task 5 means taking a single step towards tCrit
+  poke rWorkPtr tEnd -- `tCrit` must be the value in the first index in `rwork`
+  iStatePtr <- new 1
+  iOptPtr <- new 0
+  lrwPtr <- new lrwVal
+  liwPtr <- new liwVal
+  jtPtr <- new jtVal
+  let jacDummyPtr = nullFunPtr -- since I use jt=2, the jacobian can be a dummy argument. e.g. a null pointer
+  -- step1
+  -- PRE. initialize with success = True
+  let step1 :: LSODARes -> IO LSODARes
+      step1 res@LSODARes {ys = yOuts, ts = tsThisFar} = do
+        -- take a step
+        lsoda' fPtr neqPtr yPtr tPtr tOutPtr iTolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
+        -- find out how it went
+        iState <- peek iStatePtr
+        t <- peek tPtr
+        yNew <- peekArray neqVal yPtr
+        if iState < 0
+          then return res {msg = printf "Stopped. istate =%d at t=%f" iState t, success = False}
+          else if t == tEnd 
+            then return res { ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = lsodaDoneMsg } 
+            else step1 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"}
+
+  finalVal <- step1 res0 {ys = [], ts = [], success = True, msg = ""}
 
   rwork <- peekArray lrwVal rWorkPtr
   iwork <- peekArray liwVal iWorkPtr
