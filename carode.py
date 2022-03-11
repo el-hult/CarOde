@@ -6,6 +6,7 @@ import altair as alt
 clamp1 = lambda x: min(1, max(x, -1))
 
 tmax = 20.0
+tmax = 4.5e-11
 
 g = 9.81  # [m/s^2] gravitational acceleration
 wheel_radius = 0.34  # [m]
@@ -72,6 +73,7 @@ print(res.message)
 print(f"Solving took {res.nfev} function evaluations to complete")
 v = y[0, :]
 omega = y[1, :]
+[as_,alphas] = list(zip(*[func(t,y,t_drive) for t,y in zip(t,y.T)]))
 
 
 #
@@ -84,6 +86,8 @@ C_drive = "Drive torque (kNm)"
 C_roll = "Roll resistance (kN)"
 C_drag = "Drag force (kN)"
 C_sr = "Slip ratio (%)"
+C_acc = "Acceleration (m/s^2)"
+C_wAcc = "Wheel Acceleration (m/s^2)"
 data = pd.DataFrame(
     {
         C_t: t,
@@ -93,10 +97,12 @@ data = pd.DataFrame(
         C_drag: [f_drag(w) / 1000 for w in v],
         C_roll: [f_roll(w) / 1000 for w in v],
         C_sr: [100 * sigma(om, ve) for om, ve in zip(omega, v)],
+        C_acc: as_,
+        C_wAcc: [alpha*wheel_radius for alpha in alphas],
     }
 )
 alt.Chart(data).transform_fold(
-    fold=[C_v, C_omegaR, C_drive, C_sr, C_drag, C_roll], as_=["Data", "Value"]
+    fold=[C_v, C_omegaR, C_drive, C_sr, C_drag, C_roll, C_acc, C_wAcc], as_=["Data", "Value"]
 ).mark_line(point=alt.OverlayMarkDef()).encode(
     alt.Y("Value", type="quantitative", scale=alt.Scale(domain=(-2, 10))),
     alt.X(C_t),
