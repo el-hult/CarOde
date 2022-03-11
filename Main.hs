@@ -1,31 +1,105 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+import Control.Monad
+import Debug.Trace
+import Graphics.Vega.VegaLite
 import LSODA
 import Text.Printf
 
-main :: IO ()
-main = do
-  print "lsoda example:"
-  runLSODA
+g = 9.81 --[m/s^2] gravitational acceleration
+
+wheelRadius = 0.34 --[m]
+
+inertia = 5 --[kg m] moment of inertia of wheel (+drive line)
+
+mass = 1500 --[kg] mass of the care
+
+tMax = 1e-7
+
+clamp1 :: Double -> Double
+clamp1 x = min 1 $ max x (-1)
+
+inf :: Double
+inf = 1 / 0 -- lol if all is IEEE double, this is indeed infinity
+
+sigma :: Double -> Double -> Double
+sigma 0 0 = 0
+sigma omega 0 = signum omega * inf
+sigma omega v = (omega * wheelRadius - v) / abs v
+
+tDrive t
+  | t < 3 = 200
+  | t < 4 = 0
+  | t < 7 = -500
+  | t < 8 = 5500
+  | t < 13 = 2000
+  | otherwise = 0
+
+fDrag v = (-c) * v * abs v
+  where
+    c = 2 -- air resistence constant
+
+fRoll v = (-c) * v
+  where
+    c = 0.7 -- rolling resistance constant
 
 -- PRE y has length 3
 -- TODO move to some sized vector type
 fprim :: RHS
-fprim neq t y = 
-    let y0:y1:y2:_ = y
-        ydot0 = -0.4E0 * y0 + 1.0E4 * y1 * y2
-        ydot2 = 3.0e7 * y1 * y1
-        ydot1 = -ydot0 - ydot2
-    in [ydot0, ydot1, ydot2]
+fprim neq t y =
+  let v : omega : _ = y
+      slipRatio = sigma omega v
+      fTraction = (clamp1 (slipRatio / 0.06)) * mass * g
+      a = (fTraction + fDrag v + fRoll v) / mass
+      alpha = (-fTraction * wheelRadius + tDrive t) / inertia
+      out = [a, alpha]
+   in --  in traceShow out out
+      out
 
-
-runLSODA :: IO ()
-runLSODA = do
-  let ts = [4 * 10 ** m | m <- [-1 .. 11]]
-  let res = simpLsoda fprim [1, 0, 0] (StartStop 0 4e11)
-  let LSODARes {success = didSucceed, ts = ts, ys = ys} = res
-  if didSucceed
-    then
-      ( do
-          mapM_ (\(t, y) -> printf "at t = %-12.4e  y = %14.6e  %14.6e  %14.6e\n" t (head y) (y !! 1) (y !! 2)) $ zip ts ys
-          printf "no. steps =%4d  no. f-s =%4d  no. j-s =%3d\nmethod last used =%2d last switch was at t =%e\n" (noStepsTaken res) (noFs res) (noJs res) (lastMethodUsed res) (lastSwitchedAt res)
-      )
-    else print "Failed solving"
+main :: IO ()
+main = do
+  let res = simpLsoda fprim [0, 0] (StartStop 0 tMax)
+  let LSODARes {success = didSucceed, ts = t, ys = ys, msg = msg, noFs = feval} = res
+  unless didSucceed . printf "Failed solving. Message: %s" $ msg
+  printf "It took %d function evaluations to complete all" feval
+  let [v, omega] = foldr (\[v, w] [vs, ws] -> [vs ++ [v], ws ++ [w]]) [[], []] ys
+  let manualData =
+        dataFromColumns []
+          . dataColumn "Time (s)" (Numbers t)
+          . dataColumn "Speed (m/s)" (Numbers v)
+          . dataColumn "Wheel speed (m/s)" (Numbers [w * wheelRadius | w <- omega])
+          . dataColumn "Drive torque (kNm)" (Numbers [tDrive s / 1000 | s <- t])
+          . dataColumn "Roll resistance (kN)" (Numbers [fDrag w / 1000 | w <- omega])
+          . dataColumn "Drag force (kN)" (Numbers [fRoll w / 1000 | w <- omega])
+          . dataColumn "Slip ratio (%)" (Numbers [100 * sigma om ve | (om, ve) <- zip omega v])
+          $ []
+  let trans =
+        transform
+          . foldAs
+            [ "Speed (m/s)",
+              "Wheel speed (m/s)",
+              "Drive torque (kNm)",
+              "Roll resistance (kN)",
+              "Drag force (kN)"
+              -- "Slip ratio (%)"
+            ]
+            "Data"
+            "Value"
+  let enc =
+        encoding
+          . position X [PName "Time (s)", PmType Quantitative]
+          . position Y [PName "Value", PmType Quantitative, PScale [SDomain (DNumbers [-2, 10])]]
+          . color [MName "Data", MmType Nominal]
+  let sel = selection . select "view" Interval [BindScales] $ []
+  let vlPlot =
+        toVegaLite
+          [ manualData,
+            trans [],
+            mark Line [MPoint (PMMarker [])],
+            enc [],
+            height 600,
+            width 600,
+            sel
+          ]
+  toHtmlFile "plot.html" vlPlot
+  putStrLn "Wrote plot.html. Check it!"

@@ -2,6 +2,7 @@
 
 module LSODA where
 
+import Control.Applicative
 import Control.Monad
 import Foreign.Marshal.Array
 import Foreign.Marshal.Utils
@@ -109,7 +110,8 @@ data LSODARes = LSODARes
     noFs :: Int,
     noJs :: Int,
     lastMethodUsed :: Int,
-    lastSwitchedAt :: Double
+    lastSwitchedAt :: Double,
+    optOutput :: OptOut
   }
   deriving (Show)
 
@@ -123,7 +125,8 @@ res0 =
       noFs = 0,
       noJs = 0,
       lastMethodUsed = -1,
-      lastSwitchedAt = -1
+      lastSwitchedAt = -1,
+      optOutput = oo0
     }
 
 fprimWrapper :: RHS -> FFun
@@ -136,8 +139,6 @@ fprimWrapper fprim neqPtr tPtr yPtr yDotPtr = do
 data TimeSpec
   = -- | the start end end of the time interval. Indicates that the optimizer decides on step length
     StartStop Double Double
-  | -- | The time values for which to return the output
-    Range [Double]
 
 -- | a simplified LSODA API for my specific use case :)
 simpLsoda ::
@@ -146,97 +147,158 @@ simpLsoda ::
   -- | The initial state
   [Double] ->
   TimeSpec ->
-  -- | returns
-  -- left = error message
-  -- right = the trajectory at the times t
   LSODARes
 {-# NOINLINE simpLsoda #-}
-simpLsoda ffun y0 (Range ts) = unsafePerformIO $ do
-  let fex = fprimWrapper ffun
-  if length ts <= 2
-    then return $ res0 {msg = "Too short time vector", success = False, ys = [], ts = []}
-    else simpLsodaAux fex y0 (Range ts)
 simpLsoda ffun y0 ts@(StartStop _ _) = unsafePerformIO $ do
   let fex = fprimWrapper ffun
   simpLsodaAux fex y0 ts
 
+-- | a dummy OO object
+oo0 =
+  LSODAOO
+    { nst = -1,
+      nfe = -1,
+      nje = -1,
+      nqu = -1,
+      nqcur = -1,
+      imxer = -1,
+      lenrw = -1,
+      leniw = -1,
+      mused = -1,
+      mcur = -1,
+      hu = -1,
+      hcur = -1,
+      tcur = -1,
+      tolsf = -1,
+      tsw = -1
+    }
+
+data OptOut = LSODAOO
+  { -- |
+    -- nst     iwork(11) the number of steps taken for the problem so far.
+    nst :: Int,
+    -- |
+    -- nfe     iwork(12) the number of f evaluations for the problem so far.
+    nfe :: Int,
+    -- |
+    -- nje     iwork(13) the number of jacobian evaluations (and of matrix
+    --                   lu decompositions) for the problem so far.
+    nje :: Int,
+    -- |
+    -- nqu     iwork(14) the method order last used (successfully).
+    nqu :: Int,
+    -- |
+    -- | nqcur   iwork(15) the order to be attempted on the next step.
+    nqcur :: Int,
+    -- |
+    -- imxer   iwork(16) the index of the component of largest magnitude in
+    --                   the weighted local error vector ( e(i)/ewt(i) ),
+    --                   on an error return with istate = -4 or -5.
+    imxer :: Int,
+    -- | lenrw   iwork(17) the length of rwork actually required, assuming
+    --                   that the length of rwork is to be fixed for the
+    --                   rest of the problem, and that switching may occur.
+    --                   this is defined on normal returns and on an illegal
+    --                   input return for insufficient storage.
+    lenrw :: Int,
+    -- | leniw   iwork(18) the length of iwork actually required, assuming
+    --                   that the length of iwork is to be fixed for the
+    --                   rest of the problem, and that switching may occur.
+    --                   this is defined on normal returns and on an illegal
+    --                   input return for insufficient storage.
+    leniw :: Int,
+    -- | mused   iwork(19) the method indicator for the last successful step..
+    --                   1 means adams (nonstiff), 2 means bdf (stiff).
+    --  c
+    mused :: Int,
+    ---                  on the next step.  thus it differs from mused
+    --                  only if a method switch has just been made.
+
+    -- | mcur    iwork(20) the current method indicator..
+    --                   1 means adams (nonstiff), 2 means bdf (stiff).
+    --                   this is the method to be attempted
+    mcur :: Int,
+    -- hu      rwork(11) the step size in t last used (successfully).
+    hu :: Double,
+    -- hcur    rwork(12) the step size to be attempted on the next step.
+    hcur :: Double,
+    -- tcur    rwork(13) the current value of the independent variable
+    --                    which the solver has actually reached, i.e. the
+    --                    current internal mesh point in t.  on output, tcur
+    --                    will always be at least as far as the argument
+    --                    t, but may be farther (if interpolation was done).
+    tcur :: Double,
+    -- tolsf   rwork(14) a tolerance scale factor, greater than 1.0,
+    --                    computed when a request for too much accuracy was
+    --                    detected (istate = -3 if detected at the start of
+    --                    the problem, istate = -2 otherwise).  if itol is
+    --                    left unaltered but rtol and atol are uniformly
+    --                    scaled up by a factor of tolsf for the next call,
+    --                    then the solver is deemed likely to succeed.
+    --                    (the user may also ignore tolsf and alter the
+    --                    tolerance parameters in any other way appropriate.)
+    tolsf :: Double,
+    -- tsw     rwork(15) the value of t at the time of the last method
+    --                    switch, if any.
+    tsw :: Double
+  }
+  deriving (Show)
+
+parseOptOutputs :: [Int] -> [Double] -> OptOut
+parseOptOutputs iwork rwork
+  | length iwork < 20 = error "Invalid input to parseOptOutputs. iwork vector too short!"
+  | length rwork < 15 = error "Invalid input to parseOptOutputs. rwork vector too short!"
+  | otherwise =
+    LSODAOO
+      { nst = iwork !! 10,
+        nfe = iwork !! 11,
+        nje = iwork !! 12,
+        nqu = iwork !! 13,
+        nqcur = iwork !! 14,
+        imxer = iwork !! 15,
+        lenrw = iwork !! 16,
+        leniw = iwork !! 17,
+        mused = iwork !! 18,
+        mcur = iwork !! 19,
+        hu = rwork !! 10,
+        hcur = rwork !! 11,
+        tcur = rwork !! 12,
+        tolsf = rwork !! 13,
+        tsw = rwork !! 14
+      }
+
 lsodaDoneMsg = "Finished!"
 
--- PRE length ts >= 2
 simpLsodaAux :: FFun -> [Double] -> TimeSpec -> IO LSODARes
-simpLsodaAux ffun y0 (Range ts) = do
-  let neqVal = length y0
-  let lrwVal = 70 -- this work array size must be adjusted somehow.
-  let liwVal = 23 -- Im not sure if this value can ALWAYS be 23
-  fPtr <- wrapFFun ffun
-  neqPtr <- new neqVal
-  iWorkPtr <- newArray $ replicate liwVal 0
-  rWorkPtr <- newArray $ replicate lrwVal 0
-  yPtr <- newArray y0
-  tPtr <- new $ head ts
-  tOutPtr <- new 0.4
-  iTolPtr <- new 2
-  rTolPtr <- new 1e-4
-  aTolPtr <- newArray [1e-6, 1e-10, 1e-6]
-  iTaskPtr <- new 1
-  iStatePtr <- new 1
-  iOptPtr <- new 0
-  lrwPtr <- new lrwVal
-  liwPtr <- new liwVal
-  jtPtr <- new 2
-  let jacDummyPtr = nullFunPtr -- since I use jt=2, the jacobian can be a dummy argument. e.g. a null pointer
-  -- step1
-  -- PRE. initialize with success = True
-  let step1 :: LSODARes -> [Double] -> IO LSODARes
-      step1 res@LSODARes {success = False} _ = return res
-      step1 res@LSODARes {success = True} [] = return res {msg = lsodaDoneMsg}
-      step1 res@LSODARes {ys = yOuts, ts = tsThisFar} (t : ts) = do
-        poke tOutPtr t -- set the new target time
-        -- do the solving
-        lsoda' fPtr neqPtr yPtr tPtr tOutPtr iTolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
-        -- find out how it went
-        iState <- peek iStatePtr
-        t <- peek tPtr
-        yNew <- peekArray neqVal yPtr
-        if iState < 0
-          then return res {msg = printf "Stopped. istate =%d at t=%f" iState t, success = False}
-          else step1 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"} ts
-
-  finalVal <- step1 res0 {ys = [], ts = [], success = True, msg = ""} ts
-
-  rwork <- peekArray lrwVal rWorkPtr
-  iwork <- peekArray liwVal iWorkPtr
-  return
-    finalVal
-      { noStepsTaken = iwork !! 10,
-        noFs = iwork !! 11,
-        noJs = iwork !! 12,
-        lastMethodUsed = iwork !! 18,
-        lastSwitchedAt = rwork !! 14
-      }
 simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
-  let neqVal = length y0
-  let lrn = 20+16*neqVal                  -- length of rwork for nonstiff mode
-  let lrs = 22 + 9*neqVal + neqVal*neqVal -- length of rwork for    stiff mode
-  let lrwVal = max lrn lrs
-  let liwVal = 20 + neqVal
+  let neq = length y0
+  let lrn = 20 + 16 * neq -- length of rwork for nonstiff mode
+  let lrs = 22 + 9 * neq + neq * neq -- length of rwork for    stiff mode
+  let lrw = max lrn lrs
+  let liw = 20 + neq
   let jtVal = 2
+  -- task 1 means integrate up to tOut, by overshoot+interpolation.
+  -- task 2 means one step only and return
+  -- task 5 means take a variable sized step towards tOut, but don't overshoot tCrit
+  let task = 2
+  -- tol, or itol, is the type of error control
+  let tol = 2
   fPtr <- wrapFFun ffun
-  neqPtr <- new neqVal
-  iWorkPtr <- newArray $ replicate liwVal 0
-  rWorkPtr <- newArray $ replicate lrwVal 0
+  neqPtr <- new neq
+  iWorkPtr <- newArray $ replicate liw 0
+  rWorkPtr <- newArray $ replicate lrw 0
   yPtr <- newArray y0
   tPtr <- new tStart
-  tOutPtr <- new tEnd -- it is not clear to me if this matters much 
-  iTolPtr <- new 2
-  rTolPtr <- new 1e-4
-  aTolPtr <- newArray [1e-6, 1e-10, 1e-6]
-  iTaskPtr <- new 5 -- task 5 means taking a single step towards tCrit
+  tOutPtr <- new tEnd -- it is not clear to me if this matters much
+  tolPtr <- new tol
+  rTolPtr <- new 1e-3
+  aTolPtr <- newArray $ replicate neq 1e-6
+  iTaskPtr <- new task
   poke rWorkPtr tEnd -- `tCrit` must be the value in the first index in `rwork`
   iStatePtr <- new 1
-  iOptPtr <- new 0
-  lrwPtr <- new lrwVal
-  liwPtr <- new liwVal
+  iOptPtr <- new 0 -- no optional arguments
+  lrwPtr <- new lrw
+  liwPtr <- new liw
   jtPtr <- new jtVal
   let jacDummyPtr = nullFunPtr -- since I use jt=2, the jacobian can be a dummy argument. e.g. a null pointer
   -- step1
@@ -244,26 +306,26 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   let step1 :: LSODARes -> IO LSODARes
       step1 res@LSODARes {ys = yOuts, ts = tsThisFar} = do
         -- take a step
-        lsoda' fPtr neqPtr yPtr tPtr tOutPtr iTolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
+        lsoda' fPtr neqPtr yPtr tPtr tOutPtr tolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
         -- find out how it went
         iState <- peek iStatePtr
         t <- peek tPtr
-        yNew <- peekArray neqVal yPtr
+        yNew <- peekArray neq yPtr
+        printf "t %f  " =<< peek tPtr
+        printf "iwork(11) %d  " =<< peek (plusPtr iWorkPtr 10 :: Ptr Int)
+        printf "iwork(12) %d  " =<< peek (plusPtr iWorkPtr 11 :: Ptr Int)
+        printf "istate %d \n" =<< peek iStatePtr
+        print =<< liftA2 parseOptOutputs (peekArray liw iWorkPtr) (peekArray lrw rWorkPtr)
         if iState < 0
           then return res {msg = printf "Stopped. istate =%d at t=%f" iState t, success = False}
-          else if t == tEnd 
-            then return res { ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = lsodaDoneMsg } 
-            else step1 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"}
+          else
+            if t == tEnd
+              then return res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = lsodaDoneMsg}
+              else step1 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"}
 
   finalVal <- step1 res0 {ys = [], ts = [], success = True, msg = ""}
 
-  rwork <- peekArray lrwVal rWorkPtr
-  iwork <- peekArray liwVal iWorkPtr
+  rwork <- peekArray lrw rWorkPtr
+  iwork <- peekArray liw iWorkPtr
   return
-    finalVal
-      { noStepsTaken = iwork !! 10,
-        noFs = iwork !! 11,
-        noJs = iwork !! 12,
-        lastMethodUsed = iwork !! 18,
-        lastSwitchedAt = rwork !! 14
-      }
+    finalVal {optOutput = parseOptOutputs iwork rwork}
