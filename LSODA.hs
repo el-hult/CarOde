@@ -11,12 +11,16 @@ import Foreign.StablePtr
 import Foreign.Storable
 import System.IO.Unsafe
 import Text.Printf
+import Data.Int
+
+-- | Fortran int. 
+-- the exact type is dependant on the compiler options
+-- In my case, it cmpiled to single precision ints.
+type FInt = Int32
 
 -- | The right hand side function f in a ODE
 -- y' = f(t,y)
 type RHS =
-  -- | The dimensionality of f
-  Int ->
   -- | t
   Double ->
   -- | y
@@ -28,7 +32,7 @@ type RHS =
 -- It is a subroutine. I.e. returns void.
 type FFun =
   -- | `neq` The number of equations
-  Ptr Int ->
+  Ptr FInt ->
   -- | The independent variable. Called t normally
   Ptr Double ->
   -- | The current state vector. An array of length `neq`
@@ -41,7 +45,7 @@ type FFun =
 -- jac (neq, t, y, ml, mu, pd, nrowpd)
 type JacFun =
   -- | `neq` the number of equations
-  Ptr Int ->
+  Ptr FInt ->
   -- | `t` the number of equations
   Ptr Double ->
   -- | `y` the current state
@@ -55,7 +59,7 @@ type JacFun =
   -- The exact format depends on the jacobian type passed to @lsoda'
   Ptr Double ->
   -- | `nrowpd` the number of equations
-  Ptr Int ->
+  Ptr FInt ->
   ()
 
 foreign import ccall safe "lsoda_"
@@ -63,7 +67,7 @@ foreign import ccall safe "lsoda_"
     -- | void *f, // subroutine for right-hand side vector f.
     FunPtr FFun ->
     -- | int *neq, // number of first order ode-s.
-    Ptr Int ->
+    Ptr FInt ->
     -- | double *y, //array of initial values, of length neq.
     Ptr Double ->
     -- | double *t, // the initial value of the independent variable.
@@ -71,30 +75,30 @@ foreign import ccall safe "lsoda_"
     -- | double *tout, // first point where output is desired (.ne. t).
     Ptr Double ->
     -- | int *itol, // 1 or 2 according as atol (below) is a scalar or array.
-    Ptr Int ->
+    Ptr FInt ->
     -- | double *rtol, // relative tolerance parameter (scalar).
     Ptr Double ->
     -- | double *atol, // absolute tolerance parameter (scalar or array).
     Ptr Double ->
     -- | int *itask, // 1 for normal computation of output values of y at t = tout.
-    Ptr Int ->
+    Ptr FInt ->
     -- | int *istate, // integer flag (input and output).  set istate = 1.
-    Ptr Int ->
+    Ptr FInt ->
     -- | int *iopt, // 0 to indicate no optional inputs used.
-    Ptr Int ->
+    Ptr FInt ->
     -- | double *rwork, // real work array of length at least. 22 + neq * max(16, neq + 9).
     Ptr Double ->
     -- | int *lrw, // declared length of rwork (in user-s dimension).
-    Ptr Int ->
+    Ptr FInt ->
     -- | int *iwork, // integer work array of length at least  20 + neq.
-    Ptr Int ->
+    Ptr FInt ->
     -- | int *liw, // declared length of iwork (in user-s dimension).
-    Ptr Int ->
+    Ptr FInt ->
     -- | void *jac, // name of subroutine for jacobian matrix. use a dummy name.  see also paragraph e below.
     FunPtr JacFun ->
     -- | int *jt // jacobian type indicator.  set jt = 2.
     -- If jt=2, then `jac` can be a null pointer, and the jacobian is numerically evaluated instead.
-    Ptr Int ->
+    Ptr FInt ->
     IO ()
 
 foreign import ccall "wrapper" wrapFFun :: FFun -> IO (FunPtr FFun)
@@ -106,11 +110,6 @@ data LSODARes = LSODARes
     ts :: [Double],
     success :: Bool,
     msg :: String,
-    noStepsTaken :: Int,
-    noFs :: Int,
-    noJs :: Int,
-    lastMethodUsed :: Int,
-    lastSwitchedAt :: Double,
     optOutput :: OptOut
   }
   deriving (Show)
@@ -121,20 +120,15 @@ res0 =
       ts = [],
       success = True,
       msg = "Not even started",
-      noStepsTaken = 0,
-      noFs = 0,
-      noJs = 0,
-      lastMethodUsed = -1,
-      lastSwitchedAt = -1,
       optOutput = oo0
     }
 
 fprimWrapper :: RHS -> FFun
 fprimWrapper fprim neqPtr tPtr yPtr yDotPtr = do
-  neq <- peek neqPtr
+  neq <- fromIntegral <$> peek neqPtr
   y <- peekArray neq yPtr
   t <- peek tPtr
-  pokeArray yDotPtr $ fprim neq t y
+  pokeArray yDotPtr $ fprim t y
 
 data TimeSpec
   = -- | the start end end of the time interval. Indicates that the optimizer decides on step length
@@ -149,7 +143,7 @@ simpLsoda ::
   TimeSpec ->
   LSODARes
 {-# NOINLINE simpLsoda #-}
-simpLsoda ffun y0 ts@(StartStop _ _) = unsafePerformIO $ do
+simpLsoda ffun y0 ts = unsafePerformIO $ do
   let fex = fprimWrapper ffun
   simpLsodaAux fex y0 ts
 
@@ -244,8 +238,8 @@ data OptOut = LSODAOO
   }
   deriving (Show)
 
-parseOptOutputs :: [Int] -> [Double] -> OptOut
-parseOptOutputs iwork rwork
+parseOptOutputs :: [FInt] -> [Double] -> OptOut
+parseOptOutputs iwork' rwork
   | length iwork < 20 = error "Invalid input to parseOptOutputs. iwork vector too short!"
   | length rwork < 15 = error "Invalid input to parseOptOutputs. rwork vector too short!"
   | otherwise =
@@ -266,25 +260,42 @@ parseOptOutputs iwork rwork
         tolsf = rwork !! 13,
         tsw = rwork !! 14
       }
+  where iwork = map fromIntegral iwork'
 
 lsodaDoneMsg = "Finished!"
+
+
+-- TODO
+-- max nonstiff order = iwork[7]= 12
+-- max stiff order = iwork[8]=5
+-- maxstep = 0 (means infinity to LSODA)
+-- minstep = 0 
+-- nsteps = 500
+-- first_step = 0 (automatic step determination
+
+-- iwork[5] = 500 .... why?
 
 simpLsodaAux :: FFun -> [Double] -> TimeSpec -> IO LSODARes
 simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   let neq = length y0
-  let lrn = 20 + 16 * neq -- length of rwork for nonstiff mode
-  let lrs = 22 + 9 * neq + neq * neq -- length of rwork for    stiff mode
+  let maxOrderNonStiff = 12 -- the default, here made explicit
+  let maxOrderStiff = 5 -- the default, here made explicit
+  let jtVal = 2
+  let nSteps = 500 -- the default, here made explicit
+  let lrn = 20 + (maxOrderNonStiff+4) * neq -- length of rwork for nonstiff mode
+  let lrs = if jtVal `elem` [1,2] 
+                then 22 + (maxOrderStiff + 4) * neq + neq * neq -- length of rwork for    stiff mode
+                else error "Invalid! I can only handle jt=2"
   let lrw = max lrn lrs
   let liw = 20 + neq
-  let jtVal = 2
   -- task 1 means integrate up to tOut, by overshoot+interpolation.
   -- task 2 means one step only and return
   -- task 5 means take a variable sized step towards tOut, but don't overshoot tCrit
-  let task = 2
+  let task = 5
   -- tol, or itol, is the type of error control
-  let tol = 2
+  let tol = 1
   fPtr <- wrapFFun ffun
-  neqPtr <- new neq
+  neqPtr <- new $ fromIntegral neq
   iWorkPtr <- newArray $ replicate liw 0
   rWorkPtr <- newArray $ replicate lrw 0
   yPtr <- newArray y0
@@ -295,10 +306,13 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   aTolPtr <- newArray $ replicate neq 1e-6
   iTaskPtr <- new task
   poke rWorkPtr tEnd -- `tCrit` must be the value in the first index in `rwork`
+  poke (plusPtr iWorkPtr 5 :: Ptr FInt) $ fromIntegral nSteps
+  poke (plusPtr iWorkPtr 7 :: Ptr FInt) $ fromIntegral maxOrderNonStiff
+  poke (plusPtr iWorkPtr 8 :: Ptr FInt) $ fromIntegral maxOrderStiff
   iStatePtr <- new 1
   iOptPtr <- new 0 -- no optional arguments
-  lrwPtr <- new lrw
-  liwPtr <- new liw
+  lrwPtr <- new $ fromIntegral lrw
+  liwPtr <- new $ fromIntegral liw
   jtPtr <- new jtVal
   let jacDummyPtr = nullFunPtr -- since I use jt=2, the jacobian can be a dummy argument. e.g. a null pointer
   -- step1
@@ -323,7 +337,7 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
               then return res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = lsodaDoneMsg}
               else step1 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"}
 
-  finalVal <- step1 res0 {ys = [], ts = [], success = True, msg = ""}
+  finalVal <- step1 res0 {ys = [y0], ts = [tStart], success = True, msg = ""}
 
   rwork <- peekArray lrw rWorkPtr
   iwork <- peekArray liw iWorkPtr
