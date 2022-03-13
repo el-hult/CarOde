@@ -1,16 +1,24 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# OPTIONS_GHC -Wno-unused-top-binds #-} -- for wrapJacFun
 
-module LSODA where
+module LSODA
+  ( simpLsoda,
+    LSODARes (..),
+    OptOut (..),
+    RHS,
+    TimeSpec (..),
+  )
+where
 
+import Data.Int
 import Foreign.Marshal.Array
 import Foreign.Marshal.Utils
 import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe
 import Text.Printf
-import Data.Int
 
--- | Fortran int. 
+-- | Fortran int.
 -- the exact type is dependant on the compiler options
 -- In my case, it cmpiled to single precision ints.
 type FInt = Int32
@@ -100,6 +108,8 @@ foreign import ccall safe "lsoda_"
 
 foreign import ccall "wrapper" wrapFFun :: FFun -> IO (FunPtr FFun)
 
+
+-- | A function that would be needed if an analytical jacobian was available
 foreign import ccall "wrapper" wrapJacFun :: JacFun -> IO (FunPtr JacFun)
 
 data LSODARes = LSODARes
@@ -121,6 +131,7 @@ res0 =
       optOutput = oo0
     }
 
+-- | A helper that takes care of the pointer work
 fprimWrapper :: RHS -> FFun
 fprimWrapper fprim neqPtr tPtr yPtr yDotPtr = do
   neq <- fromIntegral <$> peek neqPtr
@@ -259,33 +270,25 @@ parseOptOutputs iwork' rwork
         tolsf = rwork !! 13,
         tsw = rwork !! 14
       }
-  where iwork = map fromIntegral iwork'
+  where
+    iwork = map fromIntegral iwork'
 
 lsodaDoneMsg :: String
 lsodaDoneMsg = "Finished!"
 
-
--- TODO
--- max nonstiff order = iwork[7]= 12
--- max stiff order = iwork[8]=5
--- maxstep = 0 (means infinity to LSODA)
--- minstep = 0 
--- nsteps = 500
--- first_step = 0 (automatic step determination
-
--- iwork[5] = 500 .... why?
-
+-- | Implementation of all the pointer-passing-around-stuff
 simpLsodaAux :: FFun -> [Double] -> TimeSpec -> IO LSODARes
 simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   let neq = length y0
   let maxOrderNonStiff = 12 -- the default, here made explicit
   let maxOrderStiff = 5 -- the default, here made explicit
   let jtVal = 2
-  let nSteps = 500 -- the default, here made explicit
-  let lrn = 20 + (maxOrderNonStiff+4) * neq -- length of rwork for nonstiff mode
-  let lrs = if jtVal `elem` [1,2]
-                then 22 + (maxOrderStiff + 4) * neq + neq * neq -- length of rwork for    stiff mode
-                else error "Invalid! I can only handle jt=2"
+  let nSteps = 500 :: FInt -- the default, here made explicit
+  let lrn = 20 + (maxOrderNonStiff + 4) * neq -- length of rwork for nonstiff mode
+  let lrs =
+        if jtVal `elem` [1, 2]
+          then 22 + (maxOrderStiff + 4) * neq + neq * neq -- length of rwork for    stiff mode
+          else error "Invalid! I can only handle jt=2"
   let lrw = max lrn lrs
   let liw = 20 + neq
   -- task 1 means integrate up to tOut, by overshoot+interpolation.
@@ -306,7 +309,7 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   aTolPtr <- newArray $ replicate neq 1e-6
   iTaskPtr <- new task :: IO (Ptr FInt)
   poke rWorkPtr tEnd -- `tCrit` must be the value in the first index in `rwork`
-  poke (plusPtr iWorkPtr 5 :: Ptr FInt) $ fromIntegral nSteps
+  poke (plusPtr iWorkPtr 5 :: Ptr FInt) $ nSteps
   poke (plusPtr iWorkPtr 7 :: Ptr FInt) $ fromIntegral maxOrderNonStiff
   poke (plusPtr iWorkPtr 8 :: Ptr FInt) $ fromIntegral maxOrderStiff
   iStatePtr <- new 1 -- state 1 = making the first call
@@ -325,10 +328,10 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
         iState <- peek iStatePtr
         t <- peek tPtr
         yNew <- peekArray neq yPtr
-        -- printf "t %f  " =<< peek tPtr
-        -- printf "iwork(11) %d  " =<< peek (plusPtr iWorkPtr 10 :: Ptr Int)
-        -- printf "iwork(12) %d  " =<< peek (plusPtr iWorkPtr 11 :: Ptr Int)
-        -- printf "istate %d \n" =<< peek iStatePtr
+        -- some print debugging! If needed
+        -- print (length yOuts)
+        -- print t
+        -- print yNew
         -- print =<< liftA2 parseOptOutputs (peekArray liw iWorkPtr) (peekArray lrw rWorkPtr)
         if iState /= 2
           then return res {msg = printf "Stopped. istate =%d at t=%f" iState t, success = False}

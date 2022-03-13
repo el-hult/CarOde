@@ -5,6 +5,11 @@ import Data.List
 import GHC.Real
 import Graphics.Vega.VegaLite
 import LSODA
+    ( simpLsoda,
+      LSODARes(LSODARes, success, ts, ys, msg, optOutput),
+      OptOut(LSODAOO, nfe),
+      RHS,
+      TimeSpec(StartStop) )
 import Text.Printf
 
 g :: Double
