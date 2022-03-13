@@ -22,3 +22,4 @@ executable CarOde
     blas
     lapack
     gfortran
+  ghc-options:     -Wall

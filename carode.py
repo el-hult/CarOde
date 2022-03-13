@@ -6,7 +6,6 @@ import altair as alt
 clamp1 = lambda x: min(1, max(x, -1))
 
 tmax = 20.0
-tmax = 4.5e-11
 
 g = 9.81  # [m/s^2] gravitational acceleration
 wheel_radius = 0.34  # [m]

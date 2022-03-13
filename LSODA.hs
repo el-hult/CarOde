@@ -2,12 +2,9 @@
 
 module LSODA where
 
-import Control.Applicative
-import Control.Monad
 import Foreign.Marshal.Array
 import Foreign.Marshal.Utils
 import Foreign.Ptr
-import Foreign.StablePtr
 import Foreign.Storable
 import System.IO.Unsafe
 import Text.Printf
@@ -114,6 +111,7 @@ data LSODARes = LSODARes
   }
   deriving (Show)
 
+res0 :: LSODARes
 res0 =
   LSODARes
     { ys = [],
@@ -143,11 +141,12 @@ simpLsoda ::
   TimeSpec ->
   LSODARes
 {-# NOINLINE simpLsoda #-}
-simpLsoda ffun y0 ts = unsafePerformIO $ do
+simpLsoda ffun y0 ttt = unsafePerformIO $ do
   let fex = fprimWrapper ffun
-  simpLsodaAux fex y0 ts
+  simpLsodaAux fex y0 ttt
 
 -- | a dummy OO object
+oo0 :: OptOut
 oo0 =
   LSODAOO
     { nst = -1,
@@ -262,6 +261,7 @@ parseOptOutputs iwork' rwork
       }
   where iwork = map fromIntegral iwork'
 
+lsodaDoneMsg :: String
 lsodaDoneMsg = "Finished!"
 
 
@@ -283,7 +283,7 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   let jtVal = 2
   let nSteps = 500 -- the default, here made explicit
   let lrn = 20 + (maxOrderNonStiff+4) * neq -- length of rwork for nonstiff mode
-  let lrs = if jtVal `elem` [1,2] 
+  let lrs = if jtVal `elem` [1,2]
                 then 22 + (maxOrderStiff + 4) * neq + neq * neq -- length of rwork for    stiff mode
                 else error "Invalid! I can only handle jt=2"
   let lrw = max lrn lrs
@@ -304,12 +304,12 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   tolPtr <- new tol
   rTolPtr <- new 1e-3
   aTolPtr <- newArray $ replicate neq 1e-6
-  iTaskPtr <- new task
+  iTaskPtr <- new task :: IO (Ptr FInt)
   poke rWorkPtr tEnd -- `tCrit` must be the value in the first index in `rwork`
   poke (plusPtr iWorkPtr 5 :: Ptr FInt) $ fromIntegral nSteps
   poke (plusPtr iWorkPtr 7 :: Ptr FInt) $ fromIntegral maxOrderNonStiff
   poke (plusPtr iWorkPtr 8 :: Ptr FInt) $ fromIntegral maxOrderStiff
-  iStatePtr <- new 1
+  iStatePtr <- new 1 -- state 1 = making the first call
   iOptPtr <- new 0 -- no optional arguments
   lrwPtr <- new $ fromIntegral lrw
   liwPtr <- new $ fromIntegral liw
@@ -325,12 +325,12 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
         iState <- peek iStatePtr
         t <- peek tPtr
         yNew <- peekArray neq yPtr
-        printf "t %f  " =<< peek tPtr
-        printf "iwork(11) %d  " =<< peek (plusPtr iWorkPtr 10 :: Ptr Int)
-        printf "iwork(12) %d  " =<< peek (plusPtr iWorkPtr 11 :: Ptr Int)
-        printf "istate %d \n" =<< peek iStatePtr
-        print =<< liftA2 parseOptOutputs (peekArray liw iWorkPtr) (peekArray lrw rWorkPtr)
-        if iState < 0
+        -- printf "t %f  " =<< peek tPtr
+        -- printf "iwork(11) %d  " =<< peek (plusPtr iWorkPtr 10 :: Ptr Int)
+        -- printf "iwork(12) %d  " =<< peek (plusPtr iWorkPtr 11 :: Ptr Int)
+        -- printf "istate %d \n" =<< peek iStatePtr
+        -- print =<< liftA2 parseOptOutputs (peekArray liw iWorkPtr) (peekArray lrw rWorkPtr)
+        if iState /= 2
           then return res {msg = printf "Stopped. istate =%d at t=%f" iState t, success = False}
           else
             if t == tEnd
