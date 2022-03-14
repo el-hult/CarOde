@@ -1,6 +1,6 @@
 # Car Ode example
 
-This project explores how to use a stiff solver written in fortran, to solve car physics simulations according to the outline in https://www.asawicki.info/Mirror/Car%20Physics%20for%20Games/Car%20Physics%20for%20Games.html
+This project explores how to use a stiff solver written in fortran, to solve car physics simulations according to the outline in https://www.asawicki.info/Mirror/Car%20Physics%20for%20Games/Car%20Physics%20for%20Games.html Its purpose is to be a note for my memory
 
 The issue with the simulation rules presented in that blog post is that they are stiff. It is alluded to in the post, and they claim they solved it with a RK$ integrator. However, I did not have any luck achieving acceptable performance with that, and had to use some stiff solver. After looking around ad ODE solvers for Haskell, I decided to do like `scipy.integrate.solve_ivp` and interface with ODEPACK https://computing.llnl.gov/projects/odepack/software , specifically the adaptive solver LSODA which chooses between a stiff and a nonstiff solver as needed.
 
@@ -8,12 +8,11 @@ The result is plotted with `hvega`, as it seemed to be a powerful plotting solut
 
 # Installation
 
-I did not check that this method is portable to other OS'es, but this is what I did...
+The steps below work on my Windows 10 machine, but I am quite certain that you need to do something else on other OS'es.
 
-I ran `conda install -c conda-forge mingw lapack blas` to get gfortran, blas and lapack.
+I ran `conda install -c conda-forge mingw lapack blas` to get gfortran, blas and lapack installed into my `base` conda environment.
 
-The ODEPACK library files is located in `odepack_scipy` is simply the source files from scipy https://github.com/scipy/scipy/tree/a06cc0da56df9741105eedcd160b77f6f08236e1/scipy/integrate/odepack . Compile then by running 
-
+The ODEPACK library files is located in `odepack_scipy` is simply the source files from scipy https://github.com/scipy/scipy/tree/a06cc0da56df9741105eedcd160b77f6f08236e1/scipy/integrate/odepack . Compile them by running 
 ```powershell
 rm bin -recurse -force
 mkdir bin
@@ -34,10 +33,9 @@ ar rcs bin/libodepack.a bin/*.o
 rm bin/*.o
 cabal run
 ```
+to produce a static library file that contains the compiled fortran code. The library is an archive file (`*.a`), and you can inspect it with e.g. `nm` or `objdump` to find all the `.o`-files inside it.
 
-to produce a static library file that contains the compiled fortran code. It is an archive file (`*.a`), and you can inspect it with e.g. `nm` or `objdump`.
-
-On non-windows, you might need `-fPIC` as well, but on windows it just gives a warning. See https://stackoverflow.com/questions/16708148/fpic-ignored-for-target-all-code-is-position-independent-useless-warning
+On non-windows, you might need the `-fPIC` in the calls to `gfortran`, but on Windows it just gives a warning. See https://stackoverflow.com/questions/16708148/fpic-ignored-for-target-all-code-is-position-independent-useless-warning
 
 Next check the `CarOde.cabal`-file, and make sure that the `extra-lib-dirs` section is ok. You need to provide paths to `libblas`, `liblapack`, `libgfortran` and the above compiled library as well, which should be located in `./bin`.
 
@@ -47,20 +45,19 @@ After that, you should just call `cabal run` and it should be all!
 
 This code is a wild mess. But it was a good learning experience!
 
-The fortran code is precompiled into a library archive file.
-The Haskell code interfaces via C-FFI. It needs to pass doubles and intes. The doubles are explicitly double precision floats, but the fortran integers are "integer", so compiler options could make then 64-bit instead of the standard 32-bit. So that is a thing to look out for.
+The fortran code is precompiled into a library archive fileas described above. All fortran symbol names re mangeled, so the fortran subroutine `LSODA` is called `lsoda_` in the compiled output.
 
-The fortran code passes everything by references all the time, so the code is a pointer mess. But it seems workable. So all that is hidden in the LSODA module, and the user should just work with the `simpLsoda` function only.
+The Haskell code interfaces to that library via C-FFI. It needs to pass floats, ints, and pointers. The floats are explicitly defined to be `double precision` floats in the fortran code, but the fortran integers are simply `integer`, so compiler options could change the integer type. Default is 32 bit, so that is what I code against in the Haskell code. However, one might have to be careful about bugs here.
 
-One curious thing in the code is that the fortran code want function pointers to evaluate the righ hand side of the ODE. To achieve this, you must wrap the haskell function (which works in the GHC RTS) with a nicer wrapper, that works in the C-FFI context. This is implemented by the functions `wrapJacFun` and `wrapFFun`
+All arguments to subroutines are passed reference. So there is a LOT of pointers passed around. The `LSODA` module tries to abstract that away. The client code should work with the `simpLsoda` function only.
 
-All work with pointers requires the IO monad, so the code runs in that. But since I allocate new memory for each call so `simpLsoda`, and never allow anyone access to that memory, I gave it access to `unsafePerformIO`. This should be fine, but PLEASE to not make any other IO shenanigans in that context. e.g. printing. It can really mess up the output.
+One curious thing in the code is that the fortran code wants a function pointers to evaluate the righ hand side of the ODE. Haskell functions are boxed since they are to be used in the Haskell Runtime System, so one must wrap those functions in a C-FFI-wrapper, which produces a function pointer. This is implemented by the functions `wrapJacFun` and `wrapFFun`. These are not exported from the `LSODA` module, so the client code need not care, but the module code must.
+
+Most work with pointers requires the IO monad. But since I allocate new memory for each call so `simpLsoda`, and never allow anyone access to that memory, I unwrap the `IO` by `System.IO.Unsafe.unsafePerformIO`. This should be fine since there should be no side effects. But be weary; if you print-debug in that code section, the output can become quite jumbeled.
 
 # Known issues
 
-The fortran code uses a global variable called `ls0001` to pass data between subroutines. In the compiled object files, this means that this symbol is repeatedly exported. This should not be an issue, and the linker should handle this. However, there is a bug in the dynamic linked of GHCi on windows, so GHCi is impossible to use with this library, on windows.
-
-I wrote a short addition on the GHC bug tracker about this https://gitlab.haskell.org/ghc/ghc/-/issues/6107 to show that this is an active bug.
+The fortran code uses a global variable called `ls0001` to pass data between subroutines. In the `libodepack.a`, you can therefore find the symbol `ls0001_` exported several times, under the `common`-symbol type. This should not be an issue, as the linker is supposed to handle this. However, there is a bug in the dynamic linker of GHCi on Windows, so GHCi is unable to use this library interactively. I wrote a message on the GHC bug tracker about this https://gitlab.haskell.org/ghc/ghc/-/issues/6107 to show that this is an active bug.
 
 # Alternative solutions
 
@@ -68,21 +65,21 @@ I wrote a short addition on the GHC bug tracker about this https://gitlab.haskel
 
 1. `hmatrix-gsl` https://hackage.haskell.org/package/hmatrix-gsl 
 seems to be a nice alternative, that provides adams/bdf solver for stiff problems.
-However, it provides no switching solver (which some explorations in numpy/scipy indicated was too inefficient) 
-and it needs gsl installed. And on my windows machine, that seemed like a no-go.
+There are two issues.
+Firstly, it provides no switching solver and my explorations in numpy/scipy indicated that simple BDF was too inefficient for this problem.
+Secondly, it needs gsl installed. On my windows machine, that seemed like a no-go.
 
 2. `numeric-ode` https://hackage.haskell.org/package/numeric-ode 
-package is underdeveloped and clashes with modern versions of Base.
-So that one is off the table as well.
-It would provide some implicit and implicit solvers, as well as symplectic euler and Störmer-Verlet 
-It is implemented in Haskell, so it is quite nice for inspiration.
-
+This package is underdeveloped and clashes with modern versions of Base, so it is a no-go.
+It would provide some implicit and implicit solvers, as well as symplectic euler and Störmer-Verlet,
+and I think a symplectic solver could be valuable for working with rotation of the car while turning.
+The lib is implemented in Haskell, so it is quite nice for inspiration.
 
 ## Plotting
 
 Here, there were a couple of variants thinkable
 
-1. Chart.  https://hackage.haskell.org/package/Chart
+1. Chart  https://hackage.haskell.org/package/Chart
 However, you need some backend.It seems that the package Chart-cairo is the most versatile, but it needs cairo installed
 And that seems like a mess on a windows machine. see e.g. https://stackoverflow.com/questions/9526375/how-to-install-cairo-on-windows
 
