@@ -6,40 +6,39 @@ The issue with the simulation rules presented in that blog post is that they are
 
 The result is plotted with `hvega`, as it seemed to be a powerful plotting solution, with minimal dependencies. 
 
-# Installation
+I wanted the API to work with statically sized vectors. At first, I tried the `Linear` package. But that was honestly quite hard to work with. Therefore, I swapped over to using `hmatrix` instead. Which is quite nice. More readings on the topics include these:
 
-The steps below work on my Windows 10 machine, but I am quite certain that you need to do something else on other OS'es.
+- https://en.wikibooks.org/wiki/Haskell/GADT
+- https://blog.jle.im/entry/practical-dependent-types-in-haskell-1.html 
+- https://blog.jle.im/entry/practical-dependent-types-in-haskell-2.html 
+- https://downloads.haskell.org/~ghc/9.0.1/docs/html/users_guide/exts/type_literals.html
+- https://stackoverflow.com/questions/28068129/how-to-use-linear-v-to-write-static-type-checked-matrix-operations-haskell
 
-I ran `conda install -c conda-forge mingw lapack blas` to get gfortran, blas and lapack installed into my `base` conda environment.
+# Installation (wsl2)
 
-The ODEPACK library files is located in `odepack_scipy` is simply the source files from scipy https://github.com/scipy/scipy/tree/a06cc0da56df9741105eedcd160b77f6f08236e1/scipy/integrate/odepack . Compile them by running 
-```powershell
-rm bin -recurse -force
+```bash
+sudo apt-get update
+sudo apt install gfortran libblas-dev liblapack-dev
+rm -rf bin
 mkdir bin
-gfortran -g -c odepack_numpy/lsoda.f -o bin/lsoda.o
-gfortran -g -c odepack_numpy/vode.f -o bin/vode.o
-gfortran -g -c odepack_numpy/srcma.f -o bin/srcma.o
-gfortran -g -c odepack_numpy/xerrwv.f -o bin/xerrwv.o
-gfortran -g -c odepack_numpy/prja.f -o bin/prja.o
-gfortran -g -c odepack_numpy/intdy.f -o bin/intdy.o
-gfortran -g -c odepack_numpy/vmnorm.f -o bin/vmnorm.o
-gfortran -g -c odepack_numpy/fnorm.f -o bin/fnorm.o
-gfortran -g -c odepack_numpy/ewset.f -o bin/ewset.o
-gfortran -g -c odepack_numpy/bnorm.f -o bin/bnorm.o
-gfortran -g -c odepack_numpy/solsy.f -o bin/solsy.o
-gfortran -g -c odepack_numpy/stoda.f -o bin/stoda.o
-gfortran -g -c odepack_numpy/cfode.f -o bin/cfode.o
+gfortran -c -std=legacy odepack_scipy/lsoda.f -o bin/lsoda.o
+gfortran -c -std=legacy odepack_scipy/vode.f -o bin/vode.o
+gfortran -c -std=legacy odepack_scipy/srcma.f -o bin/srcma.o
+gfortran -c -std=legacy odepack_scipy/xerrwv.f -o bin/xerrwv.o
+gfortran -c -std=legacy odepack_scipy/prja.f -o bin/prja.o
+gfortran -c -std=legacy odepack_scipy/intdy.f -o bin/intdy.o
+gfortran -c -std=legacy odepack_scipy/vmnorm.f -o bin/vmnorm.o
+gfortran -c -std=legacy odepack_scipy/fnorm.f -o bin/fnorm.o
+gfortran -c -std=legacy odepack_scipy/ewset.f -o bin/ewset.o
+gfortran -c -std=legacy odepack_scipy/bnorm.f -o bin/bnorm.o
+gfortran -c -std=legacy odepack_scipy/solsy.f -o bin/solsy.o
+gfortran -c -std=legacy odepack_scipy/stoda.f -o bin/stoda.o
+gfortran -c -std=legacy odepack_scipy/cfode.f -o bin/cfode.o
 ar rcs bin/libodepack.a bin/*.o
 rm bin/*.o
 cabal run
 ```
-to produce a static library file that contains the compiled fortran code. The library is an archive file (`*.a`), and you can inspect it with e.g. `nm` or `objdump` to find all the `.o`-files inside it.
 
-On non-windows, you might need the `-fPIC` in the calls to `gfortran`, but on Windows it just gives a warning. See https://stackoverflow.com/questions/16708148/fpic-ignored-for-target-all-code-is-position-independent-useless-warning
-
-Next check the `CarOde.cabal`-file, and make sure that the `extra-lib-dirs` section is ok. You need to provide paths to `libblas`, `liblapack`, `libgfortran` and the above compiled library as well, which should be located in `./bin`.
-
-After that, you should just call `cabal run` and it should be all!
 
 # Development
 
@@ -55,10 +54,6 @@ One curious thing in the code is that the fortran code wants a function pointers
 
 Most work with pointers requires the IO monad. But since I allocate new memory for each call so `simpLsoda`, and never allow anyone access to that memory, I unwrap the `IO` by `System.IO.Unsafe.unsafePerformIO`. This should be fine since there should be no side effects. But be weary; if you print-debug in that code section, the output can become quite jumbeled.
 
-# Known issues
-
-The fortran code uses a global variable called `ls0001` to pass data between subroutines. In the `libodepack.a`, you can therefore find the symbol `ls0001_` exported several times, under the `common`-symbol type. This should not be an issue, as the linker is supposed to handle this. However, there is a bug in the dynamic linker of GHCi on Windows, so GHCi is unable to use this library interactively. I wrote a message on the GHC bug tracker about this https://gitlab.haskell.org/ghc/ghc/-/issues/6107 to show that this is an active bug.
-
 # Alternative solutions
 
 ## ODE solving
@@ -67,7 +62,7 @@ The fortran code uses a global variable called `ls0001` to pass data between sub
 seems to be a nice alternative, that provides adams/bdf solver for stiff problems.
 There are two issues.
 Firstly, it provides no switching solver and my explorations in numpy/scipy indicated that simple BDF was too inefficient for this problem.
-Secondly, it needs gsl installed. On my windows machine, that seemed like a no-go.
+Secondly, it needs gsl installed. On my windows machine, that seemed like a no-go. I did start the project on my windows machine.
 
 2. `numeric-ode` https://hackage.haskell.org/package/numeric-ode 
 This package is underdeveloped and clashes with modern versions of Base, so it is a no-go.
@@ -81,7 +76,7 @@ Here, there were a couple of variants thinkable
 
 1. Chart  https://hackage.haskell.org/package/Chart
 However, you need some backend.It seems that the package Chart-cairo is the most versatile, but it needs cairo installed
-And that seems like a mess on a windows machine. see e.g. https://stackoverflow.com/questions/9526375/how-to-install-cairo-on-windows
+I started the project on windows and that seems like a mess on a windows machine. see e.g. https://stackoverflow.com/questions/9526375/how-to-install-cairo-on-windows
 
 2. Matplotlib https://hackage.haskell.org/package/matplotlib
 I am familiar with matplotlib on python, but it seems that it is a pain to install with tons of dependencies.

@@ -1,4 +1,6 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE KindSignatures #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-} -- for wrapJacFun
 
 module LSODA
@@ -17,6 +19,8 @@ import Foreign.Ptr
 import Foreign.Storable
 import System.IO.Unsafe
 import Text.Printf
+import Numeric.LinearAlgebra.Static
+import qualified Numeric.LinearAlgebra.Data as LAD
 
 -- | Fortran int.
 -- the exact type is dependant on the compiler options
@@ -25,13 +29,8 @@ type FInt = Int32
 
 -- | The right hand side function f in a ODE
 -- y' = f(t,y)
-type RHS =
-  -- | t
-  Double ->
-  -- | y
-  [Double] ->
-  -- | y'
-  [Double]
+type RHS =  Double -> R 2 ->  R 2
+  
 
 -- | A F-fun computes the right hand side in a ODE
 -- It is a subroutine. I.e. returns void.
@@ -113,7 +112,7 @@ foreign import ccall "wrapper" wrapFFun :: FFun -> IO (FunPtr FFun)
 foreign import ccall "wrapper" wrapJacFun :: JacFun -> IO (FunPtr JacFun)
 
 data LSODARes = LSODARes
-  { ys :: [[Double]],
+  { ys :: [R 2],
     ts :: [Double],
     success :: Bool,
     msg :: String,
@@ -132,12 +131,15 @@ res0 =
     }
 
 -- | A helper that takes care of the pointer work
+--
 fprimWrapper :: RHS -> FFun
 fprimWrapper fprim neqPtr tPtr yPtr yDotPtr = do
-  neq <- fromIntegral <$> peek neqPtr
-  y <- peekArray neq yPtr
+  neq <- peek neqPtr
+  yList <- peekArray (fromIntegral neq) yPtr
+  let yVector =  vector yList :: R 2 --- if `neq` /= 2, this will fail! unsafe!
   t <- peek tPtr
-  pokeArray yDotPtr $ fprim t y
+  let ydot = fprim t yVector
+  pokeArray yDotPtr ( LAD.toList ( unwrap ydot)) 
 
 data TimeSpec
   = -- | the start end end of the time interval. Indicates that the optimizer decides on step length
@@ -148,7 +150,7 @@ simpLsoda ::
   -- | The right hand side in the ODE
   RHS ->
   -- | The initial state
-  [Double] ->
+  R 2 ->
   TimeSpec ->
   LSODARes
 {-# NOINLINE simpLsoda #-}
@@ -213,26 +215,24 @@ data OptOut = LSODAOO
     leniw :: Int,
     -- | mused   iwork(19) the method indicator for the last successful step..
     --                   1 means adams (nonstiff), 2 means bdf (stiff).
-    --  c
     mused :: Int,
-    ---                  on the next step.  thus it differs from mused
-    --                  only if a method switch has just been made.
-
     -- | mcur    iwork(20) the current method indicator..
     --                   1 means adams (nonstiff), 2 means bdf (stiff).
     --                   this is the method to be attempted
+    --                   on the next step.  thus it differs from mused
+    --                   only if a method switch has just been made.
     mcur :: Int,
-    -- hu      rwork(11) the step size in t last used (successfully).
+    -- | hu      rwork(11) the step size in t last used (successfully).
     hu :: Double,
-    -- hcur    rwork(12) the step size to be attempted on the next step.
+    -- | hcur    rwork(12) the step size to be attempted on the next step.
     hcur :: Double,
-    -- tcur    rwork(13) the current value of the independent variable
+    -- | tcur    rwork(13) the current value of the independent variable
     --                    which the solver has actually reached, i.e. the
     --                    current internal mesh point in t.  on output, tcur
     --                    will always be at least as far as the argument
     --                    t, but may be farther (if interpolation was done).
     tcur :: Double,
-    -- tolsf   rwork(14) a tolerance scale factor, greater than 1.0,
+    -- | tolsf   rwork(14) a tolerance scale factor, greater than 1.0,
     --                    computed when a request for too much accuracy was
     --                    detected (istate = -3 if detected at the start of
     --                    the problem, istate = -2 otherwise).  if itol is
@@ -242,7 +242,7 @@ data OptOut = LSODAOO
     --                    (the user may also ignore tolsf and alter the
     --                    tolerance parameters in any other way appropriate.)
     tolsf :: Double,
-    -- tsw     rwork(15) the value of t at the time of the last method
+    -- | tsw     rwork(15) the value of t at the time of the last method
     --                    switch, if any.
     tsw :: Double
   }
@@ -277,9 +277,9 @@ lsodaDoneMsg :: String
 lsodaDoneMsg = "Finished!"
 
 -- | Implementation of all the pointer-passing-around-stuff
-simpLsodaAux :: FFun -> [Double] -> TimeSpec -> IO LSODARes
+simpLsodaAux :: FFun -> R 2 -> TimeSpec -> IO LSODARes
 simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
-  let neq = length y0
+  let neq = 2
   let maxOrderNonStiff = 12 -- the default, here made explicit
   let maxOrderStiff = 5 -- the default, here made explicit
   let jtVal = 2
@@ -301,7 +301,7 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   neqPtr <- new $ fromIntegral neq
   iWorkPtr <- newArray $ replicate liw 0
   rWorkPtr <- newArray $ replicate lrw 0
-  yPtr <- newArray y0
+  yPtr <- newArray $ LAD.toList $ unwrap y0
   tPtr <- new tStart
   tOutPtr <- new tEnd -- it is not clear to me if this matters much
   tolPtr <- new tol
@@ -327,7 +327,7 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
         -- find out how it went
         iState <- peek iStatePtr
         t <- peek tPtr
-        yNew <- peekArray neq yPtr
+        yNew <- vector <$> peekArray neq yPtr
         -- some print debugging! If needed
         -- print (length yOuts)
         -- print t

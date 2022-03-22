@@ -6,19 +6,12 @@ cabal-version:  >= 1.8
 
 library
   hs-source-dirs: lib
-  build-depends:  base
+  build-depends:  base, hmatrix
   exposed-modules: LSODA
   ghc-options:     -Wall
   extra-lib-dirs: 
     -- path to folder containing libodepack.a that you just compiled
-    -- N.B. folders with spaces in the name must be escpaed properly
-    "C:\\Users\\Ludvig\\Google Drive\\Hobbyprojekt 2022\\CarOde\\bin"
-    -- path to folder containing libblas.a
-    C:\Users\Ludvig\Miniconda3\Library\lib
-    -- path to folder containing liblapack.a
-    C:\Users\Ludvig\Miniconda3\Library\lib
-    -- path to folder containing libgfortran.a
-    C:\Users\Ludvig\Miniconda3\pkgs\m2w64-gcc-fortran-5.3.0-6\Library\mingw-w64\lib\gcc\x86_64-w64-mingw32\5.3.0
+    "/mnt/c/Users/Ludvig/Google Drive/Hobbyprojekt 2022/LSODA/bin"
 
   extra-libraries: 
     odepack
@@ -28,5 +21,5 @@ library
 
 executable car-ode
   hs-source-dirs: examples
-  build-depends:  hvega, base, CarOde
+  build-depends:  hvega, base, CarOde, hmatrix
   main-is:        CarOde.hs
