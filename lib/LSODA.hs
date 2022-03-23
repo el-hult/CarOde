@@ -136,8 +136,8 @@ res0 =
 -- | A helper that takes care of the pointer work
 -- PRE the neq supplied in calling the FFun must be the same as the type level n
 -- in defining R n
-fprimWrapper :: forall n. KnownNat n => RHS n -> FFun
-fprimWrapper (MkRHS fprim) neqPtr tPtr yPtr yDotPtr = do
+fprimWrapper :: forall n. KnownNat n => (Double -> R n -> R n) -> FFun
+fprimWrapper fprim neqPtr tPtr yPtr yDotPtr = do
   neq <- peek neqPtr
   yList <- peekArray (fromIntegral neq) yPtr
   let yVector = vector yList :: R n -- assumes 'n == neq'
@@ -148,6 +148,8 @@ fprimWrapper (MkRHS fprim) neqPtr tPtr yPtr yDotPtr = do
 data TimeSpec
   = -- | the start end end of the time interval. Indicates that the optimizer decides on step length
     StartStop Double Double
+    | -- | A list of time points, for which we want to get the results
+    TSpace [Double]
 
 -- | Tolerance specification
 -- Sensible default is 'TolS 1e-3 1e-6'
@@ -165,7 +167,7 @@ data TolSpec (n :: Nat)
 simpLsoda ::
   KnownNat n =>
   -- | The right hand side in the ODE
-  RHS n ->
+  (Double -> R n -> R n) ->
   -- | The initial state
   R n ->
   TimeSpec ->
@@ -304,7 +306,7 @@ simpLsodaAux ::
   TimeSpec ->
   TolSpec n ->
   IO (LSODARes n)
-simpLsodaAux ffun y0 (StartStop tStart tEnd) tolSpec = do
+simpLsodaAux ffun y0 timeSpec tolSpec = do
   let neq = fromIntegral $ natVal (Proxy :: Proxy n)
   let maxOrderNonStiff = 12 -- the default, here made explicit
   let maxOrderStiff = 5 -- the default, here made explicit
@@ -317,9 +319,9 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) tolSpec = do
           else error "Invalid! I can only handle jt=2"
   let lrw = max lrn lrs
   let liw = 20 + neq
-  -- task 1 means integrate up to tOut, by overshoot+interpolation.
-  -- task 5 means take a variable sized step towards tOut, but don't overshoot tCrit
-  let task = 5
+  let task = case timeSpec of 
+               (TSpace _) -> 1 -- task 1 means integrate up to tOut, by overshoot+interpolation.
+               (StartStop _ _) -> 5 -- task 5 means take a variable sized step towards tOut, but don't overshoot tCrit
   --itol   = 1 or 2 according as atol (below) is a scalar or array.
   let itol = case tolSpec of
         TolS _ _ -> 1
@@ -330,8 +332,12 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) tolSpec = do
   iWorkPtr <- newArray $ replicate liw 0
   rWorkPtr <- newArray $ replicate lrw 0
   yPtr <- newArray $ LAD.toList $ unwrap y0
+  let (tStart,tEnd) = case timeSpec of
+                      (StartStop tStart' tEnd') -> (tStart',tEnd')
+                      (TSpace (tStart':tEnd':_)) ->(tStart',tEnd')
+                      _ -> error "The TSpace has less than 2 elements!"
   tPtr <- new tStart
-  tOutPtr <- new tEnd -- it is not clear to me if this matters much
+  tOutPtr <- new tEnd
   itolPtr <- new itol
   rTolPtr <- case tolSpec of
     TolS rtol _ -> new rtol
@@ -350,29 +356,33 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) tolSpec = do
   liwPtr <- new $ fromIntegral liw
   jtPtr <- new jtVal
   let jacDummyPtr = nullFunPtr -- since I use jt=2, the jacobian can be a dummy argument. e.g. a null pointer
-  -- step1
-  -- PRE. initialize with success = True
-  let step1 :: LSODARes n -> IO (LSODARes n)
-      step1 res@LSODARes {ys = yOuts, ts = tsThisFar} = do
-        -- take a step
+  let step1 :: [Double] -> LSODARes n -> IO (LSODARes n)
+      step1 [] res = return res{msg = lsodaDoneMsg}
+      step1 (nextT:times) res@LSODARes {ys = yOuts, ts = tsThisFar} = do
+        poke tOutPtr nextT
         lsoda' fPtr neqPtr yPtr tPtr tOutPtr itolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
-        -- find out how it went
         iState <- peek iStatePtr
         t <- peek tPtr
         yNew <- vector <$> peekArray neq yPtr
-        -- some print debugging! If needed
-        -- print (length yOuts)
-        -- print t
-        -- print yNew
-        -- print =<< liftA2 parseOptOutputs (peekArray liw iWorkPtr) (peekArray lrw rWorkPtr)
+        if iState /= 2
+          then return res {msg = printf "Stopped. istate=%d at t=%f, which means %s" iState t (iStateToMsg iState), success = False}
+          else step1 times res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"}
+  let step5 :: LSODARes n -> IO (LSODARes n)
+      step5 res@LSODARes {ys = yOuts, ts = tsThisFar} = do
+        lsoda' fPtr neqPtr yPtr tPtr tOutPtr itolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
+        iState <- peek iStatePtr
+        t <- peek tPtr
+        yNew <- vector <$> peekArray neq yPtr
         if iState /= 2
           then return res {msg = printf "Stopped. istate=%d at t=%f, which means %s" iState t (iStateToMsg iState), success = False}
           else
             if t == tEnd
               then return res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = lsodaDoneMsg}
-              else step1 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"}
+              else step5 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"}
 
-  finalVal <- step1 res0 {ys = [y0], ts = [tStart], success = True, msg = "Uninitialized"}
+  finalVal <- case timeSpec of
+    (TSpace times) -> step1 (tail times) res0 {ys = [y0], ts = [tStart], success = True, msg = "Uninitialized"}
+    (StartStop _ _) -> step5 res0 {ys = [y0], ts = [tStart], success = True, msg = "Uninitialized"}
 
   rwork <- peekArray lrw rWorkPtr
   iwork <- peekArray liw iWorkPtr

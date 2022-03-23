@@ -8,11 +8,8 @@ import Control.Monad
 import qualified Numeric.LinearAlgebra as LA
 
 
-fprim :: RHS 3
-fprim = MkRHS fprim'
-
-fprim' :: (Double -> R 3 ->  R 3)
-fprim' t y =
+fprim :: (Double -> R 3 ->  R 3)
+fprim t y =
   let y0 = extract y LA.! 0
       y1 = extract y LA.! 1
       y2 = extract y LA.! 2
@@ -21,17 +18,10 @@ fprim' t y =
       ydot1 = -ydot0 - ydot2;
   in vector [ydot0,ydot1,ydot2]
 
-
--- TODO only give outputs at the desired points
--- this is triggered by using a different timespec in the API
--- the time-spec should be the range [0,0.4,4,40,400,....4e10]
--- the task should be 1 to integrate until the next time in the time-spec
-
 main :: IO ()
 main = do
-  let y0 = vector [1,0,0] :: R 3
-      tMax = 4e10
-      res = simpLsoda fprim y0 (StartStop 0 tMax) (TolV 1e-4 ( vector [1e-6,1e-10,1e-6]))
+  let y0 = vector [1,0,0]
+      res = simpLsoda fprim y0 (TSpace [0,4e-1,4e0,4e1,4e2,4e3,4e4,4e5,4e6,4e7,4e8,4e9,4e10]) (TolV 1e-4 ( vector [1e-6,1e-10,1e-6]))
       LSODARes {success = didSucceed, ts = t, ys = ys', msg = msg', optOutput = LSODAOO {nfe = feval, nst=nst,nje=nje,mused=mused,tsw=tsw}} = res
   zipWithM_ (\a b -> printf " at t = %12.4e, y = %14.6e %14.6e %14.6e\n" b (extract a LA.! 0) (extract a LA.! 1) (extract a LA.! 2)) ys' t
   unless didSucceed . printf "Failed solving. Message: %s" $ msg'

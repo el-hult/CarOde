@@ -67,11 +67,8 @@ fRoll v = (-c) * v
   where
     c = 0.7 -- rolling resistance constant
 
-fprim :: RHS 2
-fprim = MkRHS fprim'
-
-fprim' :: (Double -> R 2 ->  R 2)
-fprim' t y =
+fprim :: (Double -> R 2 ->  R 2)
+fprim t y =
   let (v, tmp) = headTail y
       (omega,_) = headTail tmp
       slipRatio = sigma omega v
@@ -91,12 +88,12 @@ main = do
   let c_roll = "Roll resistance (kN)"
   let c_drag = "Drag force (kN)"
   let c_sr = "Slip ratio (%)"
-  let res = simpLsoda fprim (0 :: R 2 ) (StartStop 0 tMax) (TolS 1e-3 1e-6)
+  let res = simpLsoda fprim 0 (StartStop 0 tMax) (TolS 1e-3 1e-6)
   let LSODARes {success = didSucceed, ts = t, ys = ys', msg = msg', optOutput = LSODAOO {nfe = feval}} = res
   unless didSucceed . printf "Failed solving. Message: %s\n" $ msg'
   printf "It took %d function evaluations to complete all\n" feval
   let [v, omega] = transpose $ map (LAD.toList . unwrap) ys'
-  let ydots = zipWith (\ a b -> LAD.toList ( unwrap ( (unRHS fprim) a b))) t ys'
+  let ydots = zipWith (\ a b -> LAD.toList ( unwrap ( fprim a b))) t ys'
   let [a, alpha] = transpose ydots
   let omegaR = [w * wheelRadius | w <- omega]
   let wAcc = [alpha' * wheelRadius | alpha' <- alpha]
