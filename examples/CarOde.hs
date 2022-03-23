@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE TypeFamilies #-}
 
 import Control.Monad
 import Data.List
@@ -10,7 +11,7 @@ import LSODA
     ( simpLsoda,
       LSODARes(LSODARes, success, ts, ys, msg, optOutput),
       OptOut(LSODAOO, nfe),
-      RHS,
+      RHS(..),
       TimeSpec(StartStop) )
 import Text.Printf
 import Numeric.LinearAlgebra.Static
@@ -65,15 +66,18 @@ fRoll v = (-c) * v
   where
     c = 0.7 -- rolling resistance constant
 
-fprim :: RHS
-fprim t y =
+fprim :: RHS 2
+fprim = MkRHS fprim'
+
+fprim' :: (Double -> R 2 ->  R 2)
+fprim' t y =
   let (v, tmp) = headTail y
       (omega,_) = headTail tmp
       slipRatio = sigma omega v
       fTraction = clamp1 (slipRatio / 0.06) * mass * g
       a = (fTraction + fDrag v + fRoll v) / mass
       alpha = (-fTraction * wheelRadius + tDrive t) / inertia
-   in vector [a, alpha]
+  in vector [a, alpha]
 
 main :: IO ()
 main = do
@@ -91,7 +95,7 @@ main = do
   unless didSucceed . printf "Failed solving. Message: %s" $ msg'
   printf "It took %d function evaluations to complete all" feval
   let [v, omega] = transpose $ map (LAD.toList . unwrap) ys'
-  let ydots = zipWith (\ a b -> LAD.toList ( unwrap ( fprim a b))) t ys'
+  let ydots = zipWith (\ a b -> LAD.toList ( unwrap ( (unRHS fprim) a b))) t ys'
   let [a, alpha] = transpose ydots
   let omegaR = [w * wheelRadius | w <- omega]
   let wAcc = [alpha' * wheelRadius | alpha' <- alpha]

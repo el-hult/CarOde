@@ -1,13 +1,14 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-} -- for wrapJacFun
 
 module LSODA
   ( simpLsoda,
     LSODARes (..),
     OptOut (..),
-    RHS,
+    RHS(..),
     TimeSpec (..),
   )
 where
@@ -21,6 +22,8 @@ import System.IO.Unsafe
 import Text.Printf
 import Numeric.LinearAlgebra.Static
 import qualified Numeric.LinearAlgebra.Data as LAD
+import GHC.TypeNats (KnownNat,Nat, natVal)
+import Data.Proxy (Proxy (..))
 
 -- | Fortran int.
 -- the exact type is dependant on the compiler options
@@ -29,8 +32,7 @@ type FInt = Int32
 
 -- | The right hand side function f in a ODE
 -- y' = f(t,y)
-type RHS =  Double -> R 2 ->  R 2
-  
+newtype RHS (n::Nat) = MkRHS {unRHS ::  Double -> R n ->  R n}
 
 -- | A F-fun computes the right hand side in a ODE
 -- It is a subroutine. I.e. returns void.
@@ -111,8 +113,8 @@ foreign import ccall "wrapper" wrapFFun :: FFun -> IO (FunPtr FFun)
 -- | A function that would be needed if an analytical jacobian was available
 foreign import ccall "wrapper" wrapJacFun :: JacFun -> IO (FunPtr JacFun)
 
-data LSODARes = LSODARes
-  { ys :: [R 2],
+data LSODARes (n::Nat)= LSODARes
+  { ys :: [R n],
     ts :: [Double],
     success :: Bool,
     msg :: String,
@@ -120,7 +122,7 @@ data LSODARes = LSODARes
   }
   deriving (Show)
 
-res0 :: LSODARes
+res0 :: LSODARes n
 res0 =
   LSODARes
     { ys = [],
@@ -131,28 +133,29 @@ res0 =
     }
 
 -- | A helper that takes care of the pointer work
---
-fprimWrapper :: RHS -> FFun
-fprimWrapper fprim neqPtr tPtr yPtr yDotPtr = do
+-- PRE the neq supplied in calling the FFun must be the same as the type level n 
+-- in defining R n
+fprimWrapper :: forall n. KnownNat n => RHS n -> FFun
+fprimWrapper (MkRHS fprim) neqPtr tPtr yPtr yDotPtr = do
   neq <- peek neqPtr
   yList <- peekArray (fromIntegral neq) yPtr
-  let yVector =  vector yList :: R 2 --- if `neq` /= 2, this will fail! unsafe!
+  let yVector =  vector yList :: R n -- assumes 'n == neq'
   t <- peek tPtr
   let ydot = fprim t yVector
-  pokeArray yDotPtr ( LAD.toList ( unwrap ydot)) 
+  pokeArray yDotPtr ( LAD.toList ( unwrap ydot))
 
 data TimeSpec
   = -- | the start end end of the time interval. Indicates that the optimizer decides on step length
     StartStop Double Double
 
 -- | a simplified LSODA API for my specific use case :)
-simpLsoda ::
+simpLsoda :: KnownNat n =>
   -- | The right hand side in the ODE
-  RHS ->
+  RHS n ->
   -- | The initial state
-  R 2 ->
+  R n ->
   TimeSpec ->
-  LSODARes
+  LSODARes n
 {-# NOINLINE simpLsoda #-}
 simpLsoda ffun y0 ttt = unsafePerformIO $ do
   let fex = fprimWrapper ffun
@@ -277,12 +280,12 @@ lsodaDoneMsg :: String
 lsodaDoneMsg = "Finished!"
 
 -- | Implementation of all the pointer-passing-around-stuff
-simpLsodaAux :: FFun -> R 2 -> TimeSpec -> IO LSODARes
+simpLsodaAux :: forall n. KnownNat n => FFun -> R n -> TimeSpec -> IO (LSODARes n)
 simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
-  let neq = 2
+  let neq = fromIntegral $ natVal (Proxy :: Proxy n)
   let maxOrderNonStiff = 12 -- the default, here made explicit
   let maxOrderStiff = 5 -- the default, here made explicit
-  let jtVal = 2
+  let jtVal = 2 -- compute jacobian by numerical approximation
   let nSteps = 500 :: FInt -- the default, here made explicit
   let lrn = 20 + (maxOrderNonStiff + 4) * neq -- length of rwork for nonstiff mode
   let lrs =
@@ -292,7 +295,6 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   let lrw = max lrn lrs
   let liw = 20 + neq
   -- task 1 means integrate up to tOut, by overshoot+interpolation.
-  -- task 2 means one step only and return
   -- task 5 means take a variable sized step towards tOut, but don't overshoot tCrit
   let task = 5
   -- tol, or itol, is the type of error control
@@ -320,7 +322,7 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   let jacDummyPtr = nullFunPtr -- since I use jt=2, the jacobian can be a dummy argument. e.g. a null pointer
   -- step1
   -- PRE. initialize with success = True
-  let step1 :: LSODARes -> IO LSODARes
+  let step1 :: LSODARes n -> IO (LSODARes n)
       step1 res@LSODARes {ys = yOuts, ts = tsThisFar} = do
         -- take a step
         lsoda' fPtr neqPtr yPtr tPtr tOutPtr tolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
