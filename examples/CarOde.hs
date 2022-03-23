@@ -12,6 +12,7 @@ import LSODA
       LSODARes(LSODARes, success, ts, ys, msg, optOutput),
       OptOut(LSODAOO, nfe),
       RHS(..),
+      TolSpec(..),
       TimeSpec(StartStop) )
 import Text.Printf
 import Numeric.LinearAlgebra.Static
@@ -90,10 +91,10 @@ main = do
   let c_roll = "Roll resistance (kN)"
   let c_drag = "Drag force (kN)"
   let c_sr = "Slip ratio (%)"
-  let res = simpLsoda fprim (0 :: R 2 ) (StartStop 0 tMax)
+  let res = simpLsoda fprim (0 :: R 2 ) (StartStop 0 tMax) (TolS 1e-3 1e-6)
   let LSODARes {success = didSucceed, ts = t, ys = ys', msg = msg', optOutput = LSODAOO {nfe = feval}} = res
-  unless didSucceed . printf "Failed solving. Message: %s" $ msg'
-  printf "It took %d function evaluations to complete all" feval
+  unless didSucceed . printf "Failed solving. Message: %s\n" $ msg'
+  printf "It took %d function evaluations to complete all\n" feval
   let [v, omega] = transpose $ map (LAD.toList . unwrap) ys'
   let ydots = zipWith (\ a b -> LAD.toList ( unwrap ( (unRHS fprim) a b))) t ys'
   let [a, alpha] = transpose ydots

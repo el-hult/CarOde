@@ -27,19 +27,13 @@ fprim' t y =
 -- the time-spec should be the range [0,0.4,4,40,400,....4e10]
 -- the task should be 1 to integrate until the next time in the time-spec
 
--- TODO adjust tolerances
--- rTolPtr <- new 1e-4
--- aTolPtr <- newArray [1e-6,1e-10,1e-6]
--- itol = 1 if atol is scalar
--- itol = 2 if atol is array
--- soecify this by a new datatype for atol in this input to simpLsoda
 main :: IO ()
 main = do
   let y0 = vector [1,0,0] :: R 3
       tMax = 4e10
-      res = simpLsoda fprim y0 (StartStop 0 tMax)
+      res = simpLsoda fprim y0 (StartStop 0 tMax) (TolV 1e-4 ( vector [1e-6,1e-10,1e-6]))
       LSODARes {success = didSucceed, ts = t, ys = ys', msg = msg', optOutput = LSODAOO {nfe = feval, nst=nst,nje=nje,mused=mused,tsw=tsw}} = res
-  sequenceA $ zipWith (\a b -> (printf " at t = %12.4e, y = %s\n" b (show a))) ys' t
+  zipWithM_ (\a b -> printf " at t = %12.4e, y = %14.6e %14.6e %14.6e\n" b (extract a LA.! 0) (extract a LA.! 1) (extract a LA.! 2)) ys' t
   unless didSucceed . printf "Failed solving. Message: %s" $ msg'
-  printf " no. steps = %4d  no. f-s = %4d  no. j-s =  %4d\n"  nst feval nje
-  printf " method last used = %2d   last switch was at t =  %12.4e\n" mused tsw
+  printf " no. steps =%4d  no. f-s =%4d  no. j-s =%4d\n"  nst feval nje
+  printf " method last used =%2d   last switch was at t =%12.4e\n" mused tsw

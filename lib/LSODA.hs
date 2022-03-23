@@ -1,29 +1,31 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# OPTIONS_GHC -Wno-unused-top-binds #-} -- for wrapJacFun
+-- for wrapJacFun
+{-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
 module LSODA
   ( simpLsoda,
     LSODARes (..),
     OptOut (..),
-    RHS(..),
+    RHS (..),
     TimeSpec (..),
+    TolSpec (..),
   )
 where
 
 import Data.Int
+import Data.Proxy (Proxy (..))
 import Foreign.Marshal.Array
 import Foreign.Marshal.Utils
 import Foreign.Ptr
 import Foreign.Storable
+import GHC.TypeNats (KnownNat, Nat, natVal)
+import qualified Numeric.LinearAlgebra.Data as LAD
+import Numeric.LinearAlgebra.Static
 import System.IO.Unsafe
 import Text.Printf
-import Numeric.LinearAlgebra.Static
-import qualified Numeric.LinearAlgebra.Data as LAD
-import GHC.TypeNats (KnownNat,Nat, natVal)
-import Data.Proxy (Proxy (..))
 
 -- | Fortran int.
 -- the exact type is dependant on the compiler options
@@ -32,7 +34,7 @@ type FInt = Int32
 
 -- | The right hand side function f in a ODE
 -- y' = f(t,y)
-newtype RHS (n::Nat) = MkRHS {unRHS ::  Double -> R n ->  R n}
+newtype RHS (n :: Nat) = MkRHS {unRHS :: Double -> R n -> R n}
 
 -- | A F-fun computes the right hand side in a ODE
 -- It is a subroutine. I.e. returns void.
@@ -109,11 +111,10 @@ foreign import ccall safe "lsoda_"
 
 foreign import ccall "wrapper" wrapFFun :: FFun -> IO (FunPtr FFun)
 
-
 -- | A function that would be needed if an analytical jacobian was available
 foreign import ccall "wrapper" wrapJacFun :: JacFun -> IO (FunPtr JacFun)
 
-data LSODARes (n::Nat)= LSODARes
+data LSODARes (n :: Nat) = LSODARes
   { ys :: [R n],
     ts :: [Double],
     success :: Bool,
@@ -133,33 +134,48 @@ res0 =
     }
 
 -- | A helper that takes care of the pointer work
--- PRE the neq supplied in calling the FFun must be the same as the type level n 
+-- PRE the neq supplied in calling the FFun must be the same as the type level n
 -- in defining R n
 fprimWrapper :: forall n. KnownNat n => RHS n -> FFun
 fprimWrapper (MkRHS fprim) neqPtr tPtr yPtr yDotPtr = do
   neq <- peek neqPtr
   yList <- peekArray (fromIntegral neq) yPtr
-  let yVector =  vector yList :: R n -- assumes 'n == neq'
+  let yVector = vector yList :: R n -- assumes 'n == neq'
   t <- peek tPtr
   let ydot = fprim t yVector
-  pokeArray yDotPtr ( LAD.toList ( unwrap ydot))
+  pokeArray yDotPtr (LAD.toList (unwrap ydot))
 
 data TimeSpec
   = -- | the start end end of the time interval. Indicates that the optimizer decides on step length
     StartStop Double Double
 
+-- | Tolerance specification
+-- Sensible default is 'TolS 1e-3 1e-6'
+data TolSpec (n :: Nat)
+  = -- | A scalar absolute . Use if you have the same tolerance for all components
+    -- 'TolS rtol atol'
+    -- encodes relative and absolute tolerance
+    TolS Double Double
+  | -- | A vector. Use if you have a specific tolerance for each component
+    -- 'TolV rtol vec'
+    -- a scalar relative tolerance, and a specific absolute tolerance per component
+    TolV Double (R n)
+
 -- | a simplified LSODA API for my specific use case :)
-simpLsoda :: KnownNat n =>
+simpLsoda ::
+  KnownNat n =>
   -- | The right hand side in the ODE
   RHS n ->
   -- | The initial state
   R n ->
   TimeSpec ->
+  -- | use 'TolS 1e-6' to use same default as numpy
+  TolSpec n ->
   LSODARes n
 {-# NOINLINE simpLsoda #-}
-simpLsoda ffun y0 ttt = unsafePerformIO $ do
+simpLsoda ffun y0 ttt tol = unsafePerformIO $ do
   let fex = fprimWrapper ffun
-  simpLsodaAux fex y0 ttt
+  simpLsodaAux fex y0 ttt tol
 
 -- | a dummy OO object
 oo0 :: OptOut
@@ -280,8 +296,15 @@ lsodaDoneMsg :: String
 lsodaDoneMsg = "Finished!"
 
 -- | Implementation of all the pointer-passing-around-stuff
-simpLsodaAux :: forall n. KnownNat n => FFun -> R n -> TimeSpec -> IO (LSODARes n)
-simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
+simpLsodaAux ::
+  forall n.
+  KnownNat n =>
+  FFun ->
+  R n ->
+  TimeSpec ->
+  TolSpec n ->
+  IO (LSODARes n)
+simpLsodaAux ffun y0 (StartStop tStart tEnd) tolSpec = do
   let neq = fromIntegral $ natVal (Proxy :: Proxy n)
   let maxOrderNonStiff = 12 -- the default, here made explicit
   let maxOrderStiff = 5 -- the default, here made explicit
@@ -297,8 +320,11 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   -- task 1 means integrate up to tOut, by overshoot+interpolation.
   -- task 5 means take a variable sized step towards tOut, but don't overshoot tCrit
   let task = 5
-  -- tol, or itol, is the type of error control
-  let tol = 1
+  --itol   = 1 or 2 according as atol (below) is a scalar or array.
+  let itol = case tolSpec of
+        TolS _ _ -> 1
+        TolV _ _ -> 2
+
   fPtr <- wrapFFun ffun
   neqPtr <- new $ fromIntegral neq
   iWorkPtr <- newArray $ replicate liw 0
@@ -306,12 +332,16 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   yPtr <- newArray $ LAD.toList $ unwrap y0
   tPtr <- new tStart
   tOutPtr <- new tEnd -- it is not clear to me if this matters much
-  tolPtr <- new tol
-  rTolPtr <- new 1e-3
-  aTolPtr <- newArray $ replicate neq 1e-6
+  itolPtr <- new itol
+  rTolPtr <- case tolSpec of
+    TolS rtol _ -> new rtol
+    TolV rtol _ -> new rtol
+  aTolPtr <- case tolSpec of
+    TolS _ atol -> new atol
+    TolV _ atol -> newArray $ LAD.toList $ unwrap atol
   iTaskPtr <- new task :: IO (Ptr FInt)
   poke rWorkPtr tEnd -- `tCrit` must be the value in the first index in `rwork`
-  poke (plusPtr iWorkPtr 5 :: Ptr FInt) $ nSteps
+  poke (plusPtr iWorkPtr 5 :: Ptr FInt) nSteps
   poke (plusPtr iWorkPtr 7 :: Ptr FInt) $ fromIntegral maxOrderNonStiff
   poke (plusPtr iWorkPtr 8 :: Ptr FInt) $ fromIntegral maxOrderStiff
   iStatePtr <- new 1 -- state 1 = making the first call
@@ -325,7 +355,7 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
   let step1 :: LSODARes n -> IO (LSODARes n)
       step1 res@LSODARes {ys = yOuts, ts = tsThisFar} = do
         -- take a step
-        lsoda' fPtr neqPtr yPtr tPtr tOutPtr tolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
+        lsoda' fPtr neqPtr yPtr tPtr tOutPtr itolPtr rTolPtr aTolPtr iTaskPtr iStatePtr iOptPtr rWorkPtr lrwPtr iWorkPtr liwPtr jacDummyPtr jtPtr
         -- find out how it went
         iState <- peek iStatePtr
         t <- peek tPtr
@@ -336,15 +366,27 @@ simpLsodaAux ffun y0 (StartStop tStart tEnd) = do
         -- print yNew
         -- print =<< liftA2 parseOptOutputs (peekArray liw iWorkPtr) (peekArray lrw rWorkPtr)
         if iState /= 2
-          then return res {msg = printf "Stopped. istate =%d at t=%f" iState t, success = False}
+          then return res {msg = printf "Stopped. istate=%d at t=%f, which means %s" iState t (iStateToMsg iState), success = False}
           else
             if t == tEnd
               then return res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = lsodaDoneMsg}
               else step1 res {ys = yOuts ++ [yNew], ts = tsThisFar ++ [t], msg = "Completed a step"}
 
-  finalVal <- step1 res0 {ys = [y0], ts = [tStart], success = True, msg = ""}
+  finalVal <- step1 res0 {ys = [y0], ts = [tStart], success = True, msg = "Uninitialized"}
 
   rwork <- peekArray lrw rWorkPtr
   iwork <- peekArray liw iWorkPtr
   return
     finalVal {optOutput = parseOptOutputs iwork rwork}
+
+iStateToMsg :: FInt -> String
+iStateToMsg 1 = "nothing was done, as tout was equal to t with istate = 1 on input.  (however, an internal counter was set to detect and prevent repeated calls of this type.)"
+iStateToMsg 2 = "the integration was performed successfully."
+iStateToMsg (-1) = "an excessive amount of work (more than mxstep steps) was done on this call, before completing the requested task, but the integration was otherwise successful as far as t.  (mxstep is an optional input and is normally 500.)  to continue, the user may simply reset istate to a value .gt. 1 and call again (the excess work step counter will be reset to 0). in addition, the user may increase mxstep to avoid this error return (see below on optional inputs)."
+iStateToMsg (-2) = "too much accuracy was requested for the precision of the machine being used.  this was detected before completing the requested task, but the integration was successful as far as t.  to continue, the tolerance parameters must be reset, and istate must be set to 3.  the optional output tolsf may be used for this purpose.  (note.. if this condition is detected before taking any steps, then an illegal input return (istate = -3) occurs instead.)"
+iStateToMsg (-3) = "illegal input was detected, before taking any integration steps.  see written message for details. note..  if the solver detects an infinite loop of calls to the solver with illegal input, it will cause the run to stop."
+iStateToMsg (-4) = "there were repeated error test failures on one attempted step, before completing the requested task, but the integration was successful as far as t. the problem may have a singularity, or the input may be inappropriate."
+iStateToMsg (-5) = "there were repeated convergence test failures on one attempted step, before completing the requested task, but the integration was successful as far as t. this may be caused by an inaccurate jacobian matrix, if one is being used."
+iStateToMsg (-6) = "ewt(i) became zero for some i during the integration.  pure relative error control (atol(i)=0.0) was requested on a variable which has now vanished. the integration was successful as far as t."
+iStateToMsg (-7) = "the length of rwork and/or iwork was too small to proceed, but the integration was successful as far as t. this happens when lsoda chooses to switch methods but lrw and/or liw is too small for the new method."
+iStateToMsg _ = error "This iState should never happen!!!"
